@@ -114,12 +114,23 @@ select:focus{border-color:#6c3fff}
     </div>
 
     <div class="sb-section">
+      <div class="sb-title">Actions</div>
+      <div class="tool-row">
+        <button class="tool-btn" onclick="undo()" title="Ctrl+Z"><i class="ti ti-arrow-back-up" aria-hidden="true"></i> Undo</button>
+        <button class="tool-btn" onclick="redo()" title="Ctrl+Shift+Z"><i class="ti ti-arrow-forward-up" aria-hidden="true"></i> Redo</button>
+        <button class="tool-btn" onclick="duplicateSelected()" title="Ctrl+D"><i class="ti ti-copy" aria-hidden="true"></i> Duplicate</button>
+        <button class="tool-btn" onclick="exportPNG()" title="Export as PNG"><i class="ti ti-download" aria-hidden="true"></i> Export PNG</button>
+      </div>
+    </div>
+
+    <div class="sb-section">
       <div class="sb-title">Layers</div>
       <div id="layers-list" style="display:flex;flex-direction:column;gap:3px"></div>
     </div>
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script>
 const canvas = document.getElementById('canvas-area');
 const hint = document.getElementById('hint');
@@ -130,6 +141,10 @@ let elCount = 0;
 let dragEl = null, dragOX = 0, dragOY = 0;
 let resizing = false;
 let curBorderColor = '#ffffff';
+let history = [];
+let historyIndex = -1;
+let restoringState = false;
+const MAX_HISTORY = 40;
 
 const GRADIENTS = [
   'linear-gradient(135deg,#6c3fff,#ff6fb4)',
@@ -199,16 +214,7 @@ function makeEl(type,styles,inner){
   rh.style.display='none';
   wrap.appendChild(rh);
 
-  rh.addEventListener('mousedown',e=>{e.stopPropagation();resizing=true;const startX=e.clientX,startY=e.clientY,startW=wrap.offsetWidth,startH=wrap.offsetHeight;const mm=e2=>{wrap.style.width=Math.max(60,startW+e2.clientX-startX)+'px';wrap.style.height=Math.max(40,startH+e2.clientY-startY)+'px';};const mu=()=>{resizing=false;document.removeEventListener('mousemove',mm);document.removeEventListener('mouseup',mu);};document.addEventListener('mousemove',mm);document.addEventListener('mouseup',mu);});
-
-  wrap.addEventListener('mousedown',e=>{
-    if(resizing)return;
-    selectEl(wrap);
-    const rect=canvas.getBoundingClientRect();
-    dragEl=wrap; dragOX=e.clientX-wrap.offsetLeft; dragOY=e.clientY-wrap.offsetTop;
-    wrap.style.cursor='grabbing';
-    e.preventDefault();
-  });
+  attachElBehavior(wrap);
 
   canvas.appendChild(wrap);
   const data={id,el:wrap,type,name:type+' '+elCount};
@@ -226,7 +232,32 @@ function makeEl(type,styles,inner){
     wrap.style.transform='translateY(0)';
   });
   setTimeout(()=>{wrap.style.transition='';applyCurrentTransform(wrap);},320);
+  pushHistory();
   return wrap;
+}
+
+function attachElBehavior(wrap){
+  const rh = wrap.querySelector('.resize-handle');
+  if(rh){
+    rh.addEventListener('mousedown',e=>{
+      e.stopPropagation();resizing=true;
+      const startX=e.clientX,startY=e.clientY,startW=wrap.offsetWidth,startH=wrap.offsetHeight;
+      const mm=e2=>{wrap.style.width=Math.max(60,startW+e2.clientX-startX)+'px';wrap.style.height=Math.max(40,startH+e2.clientY-startY)+'px';};
+      const mu=()=>{resizing=false;document.removeEventListener('mousemove',mm);document.removeEventListener('mouseup',mu);pushHistory();};
+      document.addEventListener('mousemove',mm);document.addEventListener('mouseup',mu);
+    });
+  }
+  wrap.addEventListener('mousedown',e=>{
+    if(resizing)return;
+    selectEl(wrap);
+    dragEl=wrap; dragOX=e.clientX-wrap.offsetLeft; dragOY=e.clientY-wrap.offsetTop;
+    wrap.style.cursor='grabbing';
+    e.preventDefault();
+  });
+  const editable = wrap.querySelector('[contenteditable]');
+  if(editable){
+    editable.addEventListener('blur',()=>pushHistory());
+  }
 }
 
 document.addEventListener('mousemove',e=>{
@@ -235,7 +266,7 @@ document.addEventListener('mousemove',e=>{
   dragEl.style.left=Math.max(0,Math.min(e.clientX-dragOX,rect.width-dragEl.offsetWidth))+'px';
   dragEl.style.top=Math.max(0,Math.min(e.clientY-dragOY,rect.height-dragEl.offsetHeight))+'px';
 });
-document.addEventListener('mouseup',()=>{if(dragEl){dragEl.style.cursor='grab';dragEl=null;}});
+document.addEventListener('mouseup',()=>{if(dragEl){dragEl.style.cursor='grab';dragEl=null;pushHistory();}});
 canvas.addEventListener('mousedown',e=>{if(e.target===canvas||e.target.classList.contains('grid-lines')||e.target===document.getElementById('canvas-bg')||e.target===hint){deselectAll();}});
 
 function selectEl(el){
@@ -333,7 +364,7 @@ function addLayerItem(data){
   item.dataset.id=data.id;
   item.innerHTML=`<div class="layer-dot" style="background:${colors[data.type]||'#555'}"></div><span style="font-size:12px;color:#aaa;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${data.name}</span><button class="del-btn" title="Delete">×</button>`;
   item.querySelector('span').onclick=()=>selectEl(data.el);
-  item.querySelector('.del-btn').onclick=(e)=>{e.stopPropagation();data.el.remove();elements=elements.filter(x=>x.id!==data.id);item.remove();if(selected===data.el)selected=null;if(elements.length===0)hint.style.opacity='1';};
+  item.querySelector('.del-btn').onclick=(e)=>{e.stopPropagation();data.el.remove();elements=elements.filter(x=>x.id!==data.id);item.remove();if(selected===data.el)selected=null;if(elements.length===0)hint.style.opacity='1';pushHistory();};
   item.onclick=()=>selectEl(data.el);
   layersList.prepend(item);
 }
@@ -377,12 +408,136 @@ function addShape(){
   toast('Shape added ✦');
 }
 
+// commit a history entry once a slider/select settles (not on every live 'input' tick)
+document.querySelectorAll('#sidebar input[type=range], #sidebar select').forEach(inp=>{
+  inp.addEventListener('change',()=>pushHistory());
+});
+
+function serializeState(){
+  return elements.map(d=>({
+    id:d.id, type:d.type, name:d.name,
+    cssText:d.el.style.cssText,
+    rot:d.el.dataset.rot, scale:d.el.dataset.scale,
+    html:d.el.innerHTML
+  }));
+}
+
+function pushHistory(){
+  if(restoringState)return;
+  historyIndex++;
+  history.length=historyIndex;
+  history.push(serializeState());
+  if(history.length>MAX_HISTORY){history.shift();historyIndex--;}
+}
+
+function rebuildFromState(state){
+  restoringState=true;
+  elements.forEach(d=>d.el.remove());
+  layersList.innerHTML='';
+  elements=[];
+  selected=null;
+  state.forEach(item=>{
+    const wrap=document.createElement('div');
+    wrap.className='canvas-el';
+    wrap.id=item.id;
+    wrap.dataset.type=item.type;
+    wrap.dataset.rot=item.rot;
+    wrap.dataset.scale=item.scale;
+    wrap.style.cssText=item.cssText;
+    wrap.innerHTML=item.html;
+    if(!wrap.querySelector('.resize-handle')){
+      const rh=document.createElement('div');
+      rh.className='resize-handle';rh.style.display='none';
+      wrap.appendChild(rh);
+    }
+    attachElBehavior(wrap);
+    canvas.appendChild(wrap);
+    const data={id:item.id,el:wrap,type:item.type,name:item.name};
+    elements.push(data);
+    addLayerItem(data);
+    applyCurrentTransform(wrap);
+  });
+  hint.style.opacity=elements.length?'0':'1';
+  restoringState=false;
+}
+
+function undo(){
+  if(historyIndex<=0){toast('Nothing to undo');return;}
+  historyIndex--;
+  rebuildFromState(history[historyIndex]);
+  toast('Undo ↺');
+}
+
+function redo(){
+  if(historyIndex>=history.length-1){toast('Nothing to redo');return;}
+  historyIndex++;
+  rebuildFromState(history[historyIndex]);
+  toast('Redo ↻');
+}
+
+function duplicateSelected(){
+  if(!selected){toast('Select something first');return;}
+  const data=elements.find(x=>x.el===selected);
+  if(!data)return;
+  elCount++;
+  const newId=`el-${elCount}`;
+  const wrap=selected.cloneNode(true);
+  wrap.id=newId;
+  wrap.classList.remove('selected');
+  const rh=wrap.querySelector('.resize-handle');
+  if(rh)rh.style.display='none';
+  const curLeft=parseInt(selected.style.left)||0;
+  const curTop=parseInt(selected.style.top)||0;
+  wrap.style.left=(curLeft+20)+'px';
+  wrap.style.top=(curTop+20)+'px';
+  attachElBehavior(wrap);
+  canvas.appendChild(wrap);
+  const newData={id:newId,el:wrap,type:data.type,name:data.type+' '+elCount};
+  elements.push(newData);
+  addLayerItem(newData);
+  selectEl(wrap);
+  pushHistory();
+  toast('Duplicated ✦');
+}
+
+function exportPNG(){
+  if(typeof html2canvas==='undefined'){toast('Export library failed to load');return;}
+  toast('Rendering PNG…');
+  html2canvas(canvas,{backgroundColor:null,useCORS:true}).then(renderedCanvas=>{
+    const link=document.createElement('a');
+    link.download='canvasly-export.png';
+    link.href=renderedCanvas.toDataURL('image/png');
+    link.click();
+    toast('Exported ✦');
+  }).catch(()=>toast('Export failed — check console'));
+}
+
 document.addEventListener('keydown',e=>{
-  if((e.key==='Delete'||e.key==='Backspace')&&selected&&!e.target.hasAttribute('contenteditable')){
+  const editing = e.target.hasAttribute && e.target.hasAttribute('contenteditable');
+  if((e.key==='Delete'||e.key==='Backspace')&&selected&&!editing){
     const data=elements.find(x=>x.el===selected);
     if(data){document.querySelector(`.layer-item[data-id="${data.id}"] .del-btn`).click();}
   }
   if(e.key==='Escape')deselectAll();
+  if((e.ctrlKey||e.metaKey)&&!editing){
+    if(e.key==='z'&&!e.shiftKey){e.preventDefault();undo();return;}
+    if((e.key==='z'&&e.shiftKey)||e.key==='y'){e.preventDefault();redo();return;}
+    if(e.key==='d'){e.preventDefault();duplicateSelected();return;}
+  }
+  if(selected&&!editing&&['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){
+    e.preventDefault();
+    const step=e.shiftKey?10:1;
+    let left=parseInt(selected.style.left)||0, top=parseInt(selected.style.top)||0;
+    if(e.key==='ArrowUp')top-=step;
+    if(e.key==='ArrowDown')top+=step;
+    if(e.key==='ArrowLeft')left-=step;
+    if(e.key==='ArrowRight')left+=step;
+    selected.style.left=Math.max(0,left)+'px';
+    selected.style.top=Math.max(0,top)+'px';
+  }
+});
+document.addEventListener('keyup',e=>{
+  if(selected&&['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key))pushHistory();
 });
 
 setTimeout(()=>{
