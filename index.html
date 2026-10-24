@@ -207,7 +207,7 @@ function makeEl(type,styles,inner){
   wrap.dataset.rot='0';
   wrap.dataset.scale='100';
   Object.assign(wrap.style,{left:'60px',top:'60px',width:'180px',minHeight:'80px',position:'absolute',...styles});
-  wrap.innerHTML=inner;
+  wrap.innerHTML = typeof inner === 'string' ? inner : '';
 
   const rh = document.createElement('div');
   rh.className='resize-handle';
